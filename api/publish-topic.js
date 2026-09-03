@@ -1,9 +1,9 @@
 /**
  * POST /api/publish-topic
- * Dipanggil dari browser (template forum) setelah topik baru
- * tersimpan di Firestore. Endpoint ini yang bicara ke Blogger API
- * memakai kredensial OAuth yang tersimpan aman sebagai Environment
- * Variable di Vercel (tidak pernah dikirim ke browser).
+ * Menangani DUA event:
+ *  - event tidak ada / "topic"  -> buat post Blogger baru (topik baru)
+ *  - event === "reply"          -> update post Blogger yang sudah ada
+ *                                   (tambahkan balasan ke akhir isi post)
  */
 
 const { google } = require("googleapis");
@@ -34,7 +34,7 @@ module.exports = async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Sync-Secret");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Sync-Secret, X-Requested-From");
 
   if (req.method === "OPTIONS") {
     res.status(204).end();
@@ -46,38 +46,86 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  // Kunci sederhana supaya endpoint ini tidak bisa dipakai sembarangan
-  // orang untuk spam post ke blog Anda.
+  // 1) Cek secret
   if (req.headers["x-sync-secret"] !== process.env.SYNC_SECRET) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
 
-  const { topicId, title, content, category, authorName, forumUrl } =
-    req.body || {};
-
-  if (!topicId || !title || !content) {
-    res.status(400).json({ error: "Data topik tidak lengkap" });
+  // 2) Cek origin (lapis kedua, karena secret selalu terlihat di View Source)
+  const requestedFrom = req.headers["x-requested-from"] || "";
+  if (process.env.ALLOWED_ORIGIN && requestedFrom !== process.env.ALLOWED_ORIGIN) {
+    res.status(403).json({ error: "Forbidden origin" });
     return;
   }
 
-  const forumThreadUrl = `${forumUrl}/?topic=${topicId}#forum`;
-
-  const contentHtml =
-    "<p><strong>" +
-    escapeHtml(authorName || "Member") +
-    "</strong> membuka diskusi di kategori <em>" +
-    escapeHtml(category || "Umum") +
-    "</em> di SFC150 Forum.</p>" +
-    "<p>" +
-    escapeHtml(content).replace(/\n/g, "<br/>") +
-    "</p>" +
-    '<p><a href="' +
-    forumThreadUrl +
-    '">Baca dan ikut balas diskusi ini di forum SFC150 &raquo;</a></p>';
+  const body = req.body || {};
+  const event = body.event || "topic";
 
   try {
     const blogger = getBloggerClient();
+
+    if (event === "reply") {
+      // ==== UPDATE POST YANG SUDAH ADA ====
+      const { blogPostId, topicTitle, replyContent, authorName, forumUrl, topicId } = body;
+
+      if (!blogPostId) {
+        res.status(400).json({ error: "blogPostId wajib diisi untuk event reply" });
+        return;
+      }
+
+      const existing = await blogger.posts.get({
+        blogId: process.env.BLOG_ID,
+        postId: blogPostId,
+      });
+
+      const replySnippet =
+        '<hr/><p><strong>' +
+        escapeHtml(authorName || "Member") +
+        "</strong> membalas:</p><p>" +
+        escapeHtml(replyContent).replace(/\n/g, "<br/>") +
+        "</p>";
+
+      const updatedContent = (existing.data.content || "") + replySnippet;
+
+      const result = await blogger.posts.patch({
+        blogId: process.env.BLOG_ID,
+        postId: blogPostId,
+        requestBody: {
+          content: updatedContent,
+        },
+      });
+
+      res.status(200).json({
+        updated: true,
+        blogPostId: result.data.id,
+        blogPostUrl: result.data.url,
+      });
+      return;
+    }
+
+    // ==== BUAT POST BARU (topik baru) ====
+    const { topicId, title, content, category, authorName, forumUrl } = body;
+
+    if (!topicId || !title || !content) {
+      res.status(400).json({ error: "Data topik tidak lengkap" });
+      return;
+    }
+
+    const forumThreadUrl = `${forumUrl}/?topic=${topicId}#forum`;
+
+    const contentHtml =
+      "<p><strong>" +
+      escapeHtml(authorName || "Member") +
+      "</strong> membuka diskusi di kategori <em>" +
+      escapeHtml(category || "Umum") +
+      "</em> di SFC150 Forum.</p>" +
+      "<p>" +
+      escapeHtml(content).replace(/\n/g, "<br/>") +
+      "</p>" +
+      '<p><a href="' +
+      forumThreadUrl +
+      '">Baca dan ikut balas diskusi ini di forum SFC150 &raquo;</a></p>';
 
     const result = await blogger.posts.insert({
       blogId: process.env.BLOG_ID,
@@ -93,7 +141,7 @@ module.exports = async function handler(req, res) {
       blogPostUrl: result.data.url,
     });
   } catch (err) {
-    console.error("Gagal publish ke Blogger:", err.message);
-    res.status(500).json({ error: "Gagal publish ke Blogger" });
+    console.error("Gagal sync ke Blogger:", err.message);
+    res.status(500).json({ error: "Gagal sync ke Blogger" });
   }
 };
