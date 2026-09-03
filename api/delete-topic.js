@@ -1,7 +1,5 @@
 /**
  * POST /api/delete-topic
- * Dipanggil dari browser (template forum) saat admin menghapus
- * topik, supaya post Blogger yang berkaitan ikut terhapus.
  */
 
 const { google } = require("googleapis");
@@ -22,7 +20,7 @@ module.exports = async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Sync-Secret");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Sync-Secret, X-Requested-From");
 
   if (req.method === "OPTIONS") {
     res.status(204).end();
@@ -36,6 +34,12 @@ module.exports = async function handler(req, res) {
 
   if (req.headers["x-sync-secret"] !== process.env.SYNC_SECRET) {
     res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+
+  const requestedFrom = req.headers["x-requested-from"] || "";
+  if (process.env.ALLOWED_ORIGIN && requestedFrom !== process.env.ALLOWED_ORIGIN) {
+    res.status(403).json({ error: "Forbidden origin" });
     return;
   }
 
